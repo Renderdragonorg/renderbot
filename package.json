@@ -1,0 +1,20 @@
+{
+  "name": "renderbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord bot (Components V2) that runs music copyright / licensing checks through the looney-checks engine.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "fetch-engine": "bash scripts/fetch-engine.sh"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^16.4.5"
+  }
+}
