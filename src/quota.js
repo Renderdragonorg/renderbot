@@ -55,3 +55,18 @@ export function refundQuota(store, { userId, usageDate: date }) {
   if (!date) return;
   store.decrement(String(userId), date);
 }
+
+/**
+ * Cached research costs the engine nothing, so it should not count against the
+ * daily limit either. If the result came from the engine cache, refund the
+ * reserved check and return an updated quota object for rendering.
+ */
+export function refundIfCached(store, { userId, quota, result }) {
+  if (!quota || quota.bypass || result?.ai_meta?.cache_hit !== true) return quota;
+  refundQuota(store, { userId, usageDate: quota.usageDate });
+  return {
+    ...quota,
+    used: Math.max(0, quota.used - 1),
+    remaining: Math.min(quota.limit, quota.remaining + 1),
+  };
+}

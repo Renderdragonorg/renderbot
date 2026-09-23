@@ -1,18 +1,28 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const EMPTY = () => ({ version: 1, updatedAt: new Date().toISOString(), users: {}, daily: {} });
+const EMPTY = () => ({
+  version: 1,
+  updatedAt: new Date().toISOString(),
+  users: {},
+  daily: {},
+  channels: {},
+});
 
 /**
- * Tiny JSON-file-backed store for users and daily usage.
+ * Tiny JSON-file-backed store for users, daily usage, and per-guild settings.
  *
  * Shape:
  * {
  *   "version": 1,
  *   "updatedAt": "2026-09-14T21:00:00.000Z",
  *   "users": { "<userId>": { username, firstSeenAt, lastSeenAt, totalChecks } },
- *   "daily": { "2026-09-14": { "<userId>": 3 } }
+ *   "daily": { "2026-09-14": { "<userId>": 3 } },
+ *   "channels": { "<guildId>": { "commandChannelId": "<channelId>", "updatedAt": "..." } }
  * }
+ *
+ * `channels` holds the per-guild command channel; when set, prefix and slash
+ * commands are only accepted in that channel (unset = any channel).
  *
  * Writes are atomic (temp file + rename) so a crash mid-write cannot corrupt
  * the file. The bot is single-process, so no locking is required.
@@ -40,6 +50,7 @@ export class JsonStore {
         updatedAt: parsed.updatedAt ?? new Date().toISOString(),
         users: parsed.users && typeof parsed.users === 'object' ? parsed.users : {},
         daily: parsed.daily && typeof parsed.daily === 'object' ? parsed.daily : {},
+        channels: parsed.channels && typeof parsed.channels === 'object' ? parsed.channels : {},
       };
     } catch (error) {
       const backup = `${this.filePath}.corrupt-${Date.now()}`;
@@ -107,6 +118,28 @@ export class JsonStore {
     const user = this.data.users[id];
     if (user) user.totalChecks = Math.max((user.totalChecks ?? 0) - 1, 0);
     this.#save();
+  }
+
+  /** Per-guild command channel, or null when commands are accepted anywhere. */
+  getCommandChannel(guildId) {
+    if (!guildId) return null;
+    return this.data.channels[String(guildId)]?.commandChannelId ?? null;
+  }
+
+  setCommandChannel(guildId, channelId) {
+    this.data.channels[String(guildId)] = {
+      commandChannelId: String(channelId),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#save();
+  }
+
+  clearCommandChannel(guildId) {
+    const id = String(guildId);
+    if (!this.data.channels[id]) return false;
+    delete this.data.channels[id];
+    this.#save();
+    return true;
   }
 
   getLeaderboard(limit = 10) {

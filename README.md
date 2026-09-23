@@ -72,6 +72,7 @@ The ones you are most likely to touch:
 | `DISCORD_TOKEN` / `DISCORD_CLIENT_ID` | — | Required bot credentials |
 | `DISCORD_GUILD_ID` | — | Register slash commands instantly in one guild; blank registers globally |
 | `BOT_PREFIX` | `!` | Prefix for the legacy text commands |
+| `ALLOWED_GUILD_IDS` | — (all) | Comma/space-separated guild ids the bot may serve; blank allows every server and DMs |
 | `LOONEY_BIN` | macOS vendor path | Engine executable; relative paths resolve from the project root |
 | `LOONEY_URL` | — | Use an external engine instead of spawning one |
 | `LOONEY_PORT` | `8799` | Port for the managed engine |

@@ -8,6 +8,7 @@ import {
   V2,
   buildError,
   buildHelp,
+  buildNotice,
   buildProgress,
   buildQuotaExceeded,
   buildResult,
@@ -21,9 +22,10 @@ import {
   performUrl,
   rememberSearch,
   rememberUrl,
+  runQueuedCheck,
   searchCandidates,
 } from './handlers.js';
-import { refundQuota, reserveQuota } from './quota.js';
+import { refundIfCached, refundQuota, reserveQuota } from './quota.js';
 import { isSearchQuery } from './sources.js';
 import { actorFrom } from './audit.js';
 
@@ -59,11 +61,24 @@ export const commandDefinitions = [
 
 export async function registerCommands(config) {
   const rest = new REST({ version: '10' }).setToken(config.token);
-  if (config.guildId) {
-    await rest.put(Routes.applicationGuildCommands(config.clientId, config.guildId), {
-      body: commandDefinitions,
-    });
-    console.log(`Registered ${commandDefinitions.length} slash commands in guild ${config.guildId}.`);
+  const guildTargets = config.allowedGuildIds.size
+    ? [...config.allowedGuildIds]
+    : config.guildId
+      ? [config.guildId]
+      : [];
+  if (guildTargets.length) {
+    let registered = 0;
+    for (const guildId of guildTargets) {
+      try {
+        await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), {
+          body: commandDefinitions,
+        });
+        registered += 1;
+      } catch (error) {
+        console.error(`Slash command registration failed for guild ${guildId}: ${error.message}`);
+      }
+    }
+    console.log(`Registered ${commandDefinitions.length} slash commands in ${registered} guild(s).`);
     return;
   }
   await rest.put(Routes.applicationCommands(config.clientId), { body: commandDefinitions });
@@ -113,27 +128,37 @@ function recordCheck(audit, entity, { command, source, request, result, error, s
   });
 }
 
-export async function handleSlash(interaction, { engine, store, db, audit, config }) {
+export async function handleSlash(interaction, deps) {
+  const { engine, store, db, audit, config, queue } = deps;
+  const commandChannel = db.getCommandChannel(interaction.guildId);
+  if (interaction.commandName !== 'help' && commandChannel && interaction.channelId !== commandChannel) {
+    await interaction.reply({
+      flags: V2 | MessageFlags.Ephemeral,
+      components: [buildNotice('Wrong channel', `Use <#${commandChannel}> for bot commands.`)],
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
   switch (interaction.commandName) {
     case 'help':
-      return handleHelp(interaction, config);
+      return handleHelp(interaction);
     case 'check':
-      return handleCheck(interaction, { engine, store, db, audit, config });
+      return handleCheck(interaction, { engine, store, db, audit, config, queue });
     case 'file':
-      return handleFile(interaction, { engine, db, audit, config });
+      return handleFile(interaction, { engine, db, audit, config, queue });
     default:
       return undefined;
   }
 }
 
-async function handleHelp(interaction, config) {
+async function handleHelp(interaction) {
   await interaction.reply({
     flags: V2 | MessageFlags.Ephemeral,
-    components: [buildHelp(config.prefix)],
+    components: [buildHelp()],
   });
 }
 
-async function handleCheck(interaction, { engine, store, db, audit, config }) {
+async function handleCheck(interaction, { engine, store, db, audit, config, queue }) {
   const input = interaction.options.getString('query', true).trim();
   const isPrivate = interaction.options.getBoolean('private') ?? false;
 
@@ -177,24 +202,25 @@ async function handleCheck(interaction, { engine, store, db, audit, config }) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply(isPrivate ? { flags: MessageFlags.Ephemeral } : {});
   }
-  await runUrlCheck(interaction, input, { engine, store, db, audit, quota });
+  await runUrlCheck(interaction, input, { engine, store, db, audit, quota, queue });
 }
 
-async function runUrlCheck(interaction, input, { engine, store, db, audit, quota }) {
-  await interaction.editReply({
-    flags: V2,
-    components: [buildProgress({ note: `\`${input}\`` })],
-    allowedMentions: { parse: [] },
-  });
-
+async function runUrlCheck(interaction, input, { engine, store, db, audit, quota, queue }) {
   let delivered = false;
   const startedAt = Date.now();
   const contextId = rememberUrl(store, input);
   const onProgress = makeProgress(interaction, { note: `\`${input}\`` });
   try {
-    const result = await performUrl(engine, input, { onProgress });
+    const result = await runQueuedCheck({
+      queue,
+      edit: (payload) => interaction.editReply(payload),
+      queueBase: { note: `\`${input}\`` },
+      progressBase: { note: `\`${input}\`` },
+      task: () => performUrl(engine, input, { onProgress }),
+    });
+    const finalQuota = refundIfCached(db, { userId: interaction.user.id, quota, result });
     await interaction.editReply(
-      componentsV2(buildResult(result, { sourceInput: input, refreshContextId: contextId, quota })),
+      componentsV2(buildResult(result, { sourceInput: input, refreshContextId: contextId, quota: finalQuota })),
     );
     delivered = true;
     recordCheck(audit, interaction, { command: 'check', source: 'url', request: input, result, startedAt });
@@ -206,7 +232,7 @@ async function runUrlCheck(interaction, input, { engine, store, db, audit, quota
   }
 }
 
-async function handleFile(interaction, { engine, db, audit, config }) {
+async function handleFile(interaction, { engine, db, audit, config, queue }) {
   const attachment = interaction.options.getAttachment('audio', true);
   const isPrivate = interaction.options.getBoolean('private') ?? false;
 
@@ -220,20 +246,24 @@ async function handleFile(interaction, { engine, db, audit, config }) {
   }
 
   await interaction.deferReply(isPrivate ? { flags: MessageFlags.Ephemeral } : {});
-  await interaction.editReply({
-    flags: V2,
-    components: [buildProgress({ title: 'File copyright check', note: `\`${attachment.name}\`` })],
-    allowedMentions: { parse: [] },
-  });
 
   let delivered = false;
   const startedAt = Date.now();
   const onProgress = makeProgress(interaction, { title: 'File copyright check', note: `\`${attachment.name}\`` });
   try {
-    const file = await downloadAttachment(attachment);
-    const result = await performFile(engine, file, { onProgress });
+    const result = await runQueuedCheck({
+      queue,
+      edit: (payload) => interaction.editReply(payload),
+      queueBase: { title: 'File copyright check', note: `\`${attachment.name}\`` },
+      progressBase: { title: 'File copyright check', note: `\`${attachment.name}\`` },
+      task: async () => {
+        const file = await downloadAttachment(attachment);
+        return performFile(engine, file, { onProgress });
+      },
+    });
+    const finalQuota = refundIfCached(db, { userId: interaction.user.id, quota, result });
     await interaction.editReply(
-      componentsV2(buildResult(result, { sourceInput: attachment.name, quota })),
+      componentsV2(buildResult(result, { sourceInput: attachment.name, quota: finalQuota })),
     );
     delivered = true;
     recordCheck(audit, interaction, { command: 'file', source: 'file', request: attachment.name, result, startedAt });
@@ -245,11 +275,12 @@ async function handleFile(interaction, { engine, db, audit, config }) {
   }
 }
 
-export async function handleButton(interaction, { engine, store, db, audit, config }) {
+export async function handleButton(interaction, deps) {
+  const { engine, store, db, audit, config, queue } = deps;
   const [namespace, action, contextId, extra] = interaction.customId.split(':');
   if (namespace !== 'looney') return;
   if (action === 'pick') {
-    return handlePick(interaction, { engine, store, db, audit, config }, contextId, Number(extra));
+    return handlePick(interaction, { engine, store, db, audit, config, queue }, contextId, Number(extra));
   }
   if (action !== 'refresh') return;
 
@@ -272,19 +303,21 @@ export async function handleButton(interaction, { engine, store, db, audit, conf
   }
 
   await interaction.deferUpdate();
-  await interaction.editReply({
-    flags: V2,
-    components: [buildProgress({ note: `\`${context.input}\`` })],
-    allowedMentions: { parse: [] },
-  });
 
   let delivered = false;
   const startedAt = Date.now();
   const onProgress = makeProgress(interaction, { note: `\`${context.input}\`` });
   try {
-    const result = await performUrl(engine, context.input, { refresh: true, onProgress });
+    const result = await runQueuedCheck({
+      queue,
+      edit: (payload) => interaction.editReply(payload),
+      queueBase: { note: `\`${context.input}\`` },
+      progressBase: { note: `\`${context.input}\`` },
+      task: () => performUrl(engine, context.input, { refresh: true, onProgress }),
+    });
+    const finalQuota = refundIfCached(db, { userId: interaction.user.id, quota, result });
     await interaction.editReply(
-      componentsV2(buildResult(result, { sourceInput: context.input, refreshContextId: contextId, quota })),
+      componentsV2(buildResult(result, { sourceInput: context.input, refreshContextId: contextId, quota: finalQuota })),
     );
     delivered = true;
     recordCheck(audit, interaction, {
@@ -308,7 +341,7 @@ export async function handleButton(interaction, { engine, store, db, audit, conf
   }
 }
 
-async function handlePick(interaction, { engine, store, db, audit, config }, contextId, index) {
+async function handlePick(interaction, { engine, store, db, audit, config, queue }, contextId, index) {
   const context = store.get(contextId);
   const candidate = context?.kind === 'search' ? context.candidates?.[index] : null;
   if (!candidate?.url) {
@@ -330,20 +363,22 @@ async function handlePick(interaction, { engine, store, db, audit, config }, con
 
   const input = candidate.url;
   await interaction.deferUpdate();
-  await interaction.editReply({
-    flags: V2,
-    components: [buildProgress({ note: `\`${input}\`` })],
-    allowedMentions: { parse: [] },
-  });
 
   let delivered = false;
   const startedAt = Date.now();
   const refreshContextId = rememberUrl(store, input);
   const onProgress = makeProgress(interaction, { note: `\`${input}\`` });
   try {
-    const result = await performUrl(engine, input, { onProgress });
+    const result = await runQueuedCheck({
+      queue,
+      edit: (payload) => interaction.editReply(payload),
+      queueBase: { note: `\`${input}\`` },
+      progressBase: { note: `\`${input}\`` },
+      task: () => performUrl(engine, input, { onProgress }),
+    });
+    const finalQuota = refundIfCached(db, { userId: interaction.user.id, quota, result });
     await interaction.editReply(
-      componentsV2(buildResult(result, { sourceInput: input, refreshContextId, quota })),
+      componentsV2(buildResult(result, { sourceInput: input, refreshContextId, quota: finalQuota })),
     );
     delivered = true;
     recordCheck(audit, interaction, { command: 'check', source: 'url', request: input, result, startedAt });

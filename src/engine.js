@@ -71,9 +71,28 @@ export class LooneyEngine {
       '--host', '127.0.0.1',
       '--port', String(this.config.port),
       '--ai-backend', this.config.aiBackend,
-      '--model', this.config.model,
       '--timeout', String(this.config.timeoutSec),
     );
+    // `--model` only overrides the primary backend. Token Harbor (and any
+    // OpenAI-compatible gateway) takes its base URL/model from dedicated flags,
+    // which must be passed whenever it appears anywhere in the chain — primary
+    // or fallback.
+    if (this.config.aiBackend !== 'openai-compatible') {
+      args.push('--model', this.config.model);
+    }
+    const chain = [this.config.aiBackend, ...(this.config.aiFallbackBackends ?? [])];
+    if (chain.includes('openai-compatible')) {
+      if (this.config.openaiCompatBaseUrl) {
+        args.push('--openai-compatible-base-url', this.config.openaiCompatBaseUrl);
+      }
+      if (this.config.openaiCompatModel) {
+        args.push('--openai-compatible-model', this.config.openaiCompatModel);
+      }
+    }
+    for (const backend of this.config.aiFallbackBackends ?? []) {
+      args.push('--fallback-ai-backend', backend);
+    }
+    if (this.config.searchBackend) args.push('--search-backend', this.config.searchBackend);
     if (this.config.noCache) args.push('--no-cache');
     else if (this.config.cachePath) args.push('--cache-path', this.config.cachePath);
     if (this.config.noAi) args.push('--no-ai');
@@ -83,6 +102,9 @@ export class LooneyEngine {
     if (this.config.openrouterApiKey) env.OPENROUTER_API_KEY = this.config.openrouterApiKey;
     if (this.config.opencodeGoApiKey) env.OPENCODE_GO_API_KEY = this.config.opencodeGoApiKey;
     if (this.config.youtubeApiKey) env.YOUTUBE_API_KEY = this.config.youtubeApiKey;
+    if (this.config.openaiCompatApiKey) env.OPENAI_COMPAT_API_KEY = this.config.openaiCompatApiKey;
+    if (this.config.exaApiKey) env.EXA_API_KEY = this.config.exaApiKey;
+    if (this.config.fallbackRetries) env.MUSIC_CHECKER_FALLBACK_RETRIES = String(this.config.fallbackRetries);
 
     this.child = spawn(this.config.bin, args, {
       env,
@@ -90,7 +112,9 @@ export class LooneyEngine {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    this.#log(`spawning engine on port ${this.config.port} (${this.config.aiBackend} / ${this.config.model})`);
+    const modelLabel =
+      this.config.aiBackend === 'openai-compatible' ? this.config.openaiCompatModel : this.config.model;
+    this.#log(`spawning engine on port ${this.config.port} (${chain.join(' -> ')} / ${modelLabel})`);
     this.child.stdout.on('data', (chunk) => this.#log(chunk.toString()));
     this.child.stderr.on('data', (chunk) => this.#log(chunk.toString()));
 
@@ -194,33 +218,47 @@ export class LooneyEngine {
     return body;
   }
 
+  /**
+   * Run a URL/id/query check. Transient engine failures — the free router
+   * returning an empty or truncated completion, 5xx/429 responses, dropped
+   * connections — are retried automatically so a flaky AI response does not
+   * surface to the user (quota is reserved once and only refunded if every
+   * attempt fails).
+   */
   check(payload, { refresh = false, onProgress } = {}) {
-    const sync = () => {
-      const body = { ...payload };
-      if (refresh) body.refresh = true;
-      return this.#request('/check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+    const attempt = () => {
+      const sync = () => {
+        const body = { ...payload };
+        if (refresh) body.refresh = true;
+        return this.#request('/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      };
+      return this.#jobsThenSync(
+        () => this.#runJob({ json: { ...payload, ...(refresh ? { refresh: true } : {}) } }, onProgress),
+        sync,
+      );
     };
-    return this.#jobsThenSync(
-      () => this.#runJob({ json: { ...payload, ...(refresh ? { refresh: true } : {}) } }, onProgress),
-      sync,
-    );
+    return this.#withRetry(attempt, { onProgress });
   }
 
+  /** File-upload equivalent of {@link check} (also retried on transient failures). */
   checkFile({ data, filename, contentType }, { refresh = false, onProgress } = {}) {
-    const sync = () => {
-      const form = new FormData();
-      form.append('file', new Blob([data], contentType ? { type: contentType } : undefined), filename);
-      if (refresh) form.append('refresh', 'true');
-      return this.#request('/check', { method: 'POST', body: form });
+    const attempt = () => {
+      const sync = () => {
+        const form = new FormData();
+        form.append('file', new Blob([data], contentType ? { type: contentType } : undefined), filename);
+        if (refresh) form.append('refresh', 'true');
+        return this.#request('/check', { method: 'POST', body: form });
+      };
+      return this.#jobsThenSync(
+        () => this.#runJob({ file: { data, filename, contentType }, refresh }, onProgress),
+        sync,
+      );
     };
-    return this.#jobsThenSync(
-      () => this.#runJob({ file: { data, filename, contentType }, refresh }, onProgress),
-      sync,
-    );
+    return this.#withRetry(attempt, { onProgress });
   }
 
   /**
@@ -250,6 +288,59 @@ export class LooneyEngine {
       }
       throw error;
     }
+  }
+
+  /**
+   * Whether a failed attempt is worth retrying. Bad input and our own hard
+   * limits (missing binary, health/job timeouts on an already-broken engine)
+   * are permanent; everything else — empty/truncated AI completions, 5xx, 429,
+   * dropped sockets — is treated as transient free-router flakiness.
+   */
+  #isRetryable(error) {
+    if (!(error instanceof EngineError)) return true;
+    if (typeof error.status === 'number') {
+      if (error.status === 404) return false;
+      if (error.status >= 400 && error.status < 500 && error.status !== 429) return false;
+    }
+    const message = String(error.message ?? '');
+    return !/engine binary not found|did not finish within|did not become ready|something else is listening/i.test(
+      message,
+    );
+  }
+
+  /** Retries `attempt()` on transient failures, bounded by attempts and a time budget. */
+  async #withRetry(attempt, { onProgress } = {}) {
+    const total = Math.max(1, this.config.retryAttempts ?? 1);
+    const budgetMs = this.config.retryBudgetMs ?? 0;
+    const startedAt = Date.now();
+    let lastError = null;
+    for (let attemptNumber = 1; attemptNumber <= total; attemptNumber += 1) {
+      try {
+        return await attempt();
+      } catch (error) {
+        lastError = error;
+        const canRetry =
+          attemptNumber < total && this.#isRetryable(error) && Date.now() - startedAt < budgetMs;
+        if (!canRetry) throw error;
+        const delayMs = Math.min(30_000, 3_000 * 2 ** (attemptNumber - 1));
+        this.#log(
+          `transient failure on attempt ${attemptNumber}/${total} (${error.message}); retrying in ${delayMs}ms`,
+        );
+        if (onProgress) {
+          try {
+            await onProgress({
+              status: 'running',
+              stage: 'retry',
+              message: `Transient engine error — retrying automatically (attempt ${attemptNumber + 1}/${total})…`,
+            });
+          } catch {
+            /* progress updates are best-effort */
+          }
+        }
+        await sleep(delayMs);
+      }
+    }
+    throw lastError;
   }
 
   async #runJob({ json, file, refresh = false }, onProgress) {

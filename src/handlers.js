@@ -1,4 +1,5 @@
 import { EngineError } from './engine.js';
+import { V2, buildProgress, buildQueueStatus } from './render.js';
 import { buildLookupPayload } from './sources.js';
 
 export const SUPPORTED_EXTENSIONS = [
@@ -73,6 +74,29 @@ export function performFile(engine, file, { refresh = false, onProgress } = {}) 
 /** Fetch pickable YouTube search candidates for a free-text query. */
 export function searchCandidates(engine, query, { limit = 5 } = {}) {
   return engine.searchYouTube(query, { limit });
+}
+
+/**
+ * Run a check through the shared queue, keeping one message in sync: a queue
+ * position container while waiting, then the progress container once it starts.
+ * `task` is a zero-argument function returning the check promise; `edit` is the
+ * message-editing callback (interaction or message based).
+ */
+export function runQueuedCheck({ queue, edit, queueBase = {}, progressBase = {}, task }) {
+  const show = (container) => {
+    Promise.resolve(edit({ flags: V2, components: [container], allowedMentions: { parse: [] } })).catch(() => {});
+  };
+  let started = false;
+  return queue.enqueue(task, {
+    onState: (state) => {
+      if (state.state === 'running') {
+        started = true;
+        show(buildProgress(progressBase));
+      } else if (!started) {
+        show(buildQueueStatus({ ...queueBase, position: state.position, total: state.total }));
+      }
+    },
+  }).promise;
 }
 
 export function rememberUrl(store, input) {

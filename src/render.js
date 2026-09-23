@@ -26,16 +26,23 @@ const COLOR = {
 const VERDICTS = {
   likely_not_permitted_without_permission: {
     label: 'Likely not permitted without permission',
+    emoji: '\u{1F534}',
     rank: 4,
     color: COLOR.stop,
   },
-  clearance_required: { label: 'Clearance required', rank: 3, color: COLOR.caution },
+  clearance_required: {
+    label: 'Clearance required',
+    emoji: '\u{1F7E0}',
+    rank: 3,
+    color: COLOR.caution,
+  },
   potentially_usable_with_platform_license: {
     label: 'Potentially usable with a platform license',
+    emoji: '\u{1F7E1}',
     rank: 2,
     color: COLOR.warn,
   },
-  unknown: { label: 'Unknown', rank: 1, color: COLOR.neutral },
+  unknown: { label: 'Unknown', emoji: '\u26AA', rank: 1, color: COLOR.neutral },
 };
 
 const TOTAL_TEXT_BUDGET = 3_900;
@@ -88,13 +95,17 @@ function verdictOf(value) {
   return VERDICTS[value] ?? VERDICTS.unknown;
 }
 
-function accentFor(usage, status) {
-  if (status === 'not_found') return COLOR.neutral;
+function highestVerdict(usage, status) {
+  if (status === 'not_found') return VERDICTS.unknown;
   const ranks = [usage?.video_verdict, usage?.social_media_verdict, usage?.reality_tv_verdict].map(
     (verdict) => verdictOf(verdict).rank,
   );
   const highest = Math.max(...ranks, 1);
-  return Object.values(VERDICTS).find((entry) => entry.rank === highest)?.color ?? COLOR.info;
+  return Object.values(VERDICTS).find((entry) => entry.rank === highest) ?? VERDICTS.unknown;
+}
+
+function accentFor(usage, status) {
+  return highestVerdict(usage, status).color ?? COLOR.info;
 }
 
 function separator(container) {
@@ -129,7 +140,17 @@ export function buildProgress({ title = 'Copyright check', note, stage } = {}) {
   if (note) lines.push(truncate(note, 300));
   if (stage) lines.push(`-# ${truncate(stage, 200)}`);
   return new ContainerBuilder()
-    .setAccentColor(COLOR.info)
+    .addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join('\n')));
+}
+
+export function buildQueueStatus({ position, total, note } = {}) {
+  const lines = [
+    '## In queue',
+    `You are **#${position ?? '?'} of ${total ?? '?'}** in the queue.`,
+    '-# Your check starts automatically when a slot frees up.',
+  ];
+  if (note) lines.push(note);
+  return new ContainerBuilder()
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join('\n')));
 }
 
@@ -137,7 +158,6 @@ export function buildError(error, { retryContextId } = {}) {
   const message = typeof error === 'string' ? error : error?.message ?? 'Unknown error';
   const detail = typeof error === 'object' ? error?.detail : null;
   const container = new ContainerBuilder()
-    .setAccentColor(COLOR.stop)
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`## Check failed\n${truncate(message, 1_500)}`));
   if (detail) {
     container.addTextDisplayComponents(
@@ -157,9 +177,8 @@ export function buildError(error, { retryContextId } = {}) {
   return container;
 }
 
-export function buildHelp(prefix) {
+export function buildHelp() {
   return new ContainerBuilder()
-    .setAccentColor(COLOR.info)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
         [
@@ -170,10 +189,6 @@ export function buildHelp(prefix) {
           '`/check query:<Spotify or YouTube URL, video id, or search>`',
           '`/file audio:<attachment>`',
           '',
-          `**Prefix commands** (\`${prefix}\`)`,
-          `\`${prefix}check <URL or search>\``,
-          `\`${prefix}file\` (with an audio attachment)`,
-          '',
           'Results are research assistance, not legal advice.',
         ].join('\n'),
       ),
@@ -181,7 +196,7 @@ export function buildHelp(prefix) {
 }
 
 export function buildSearchResults({ query, candidates, contextId }) {
-  const container = new ContainerBuilder().setAccentColor(COLOR.info);
+  const container = new ContainerBuilder();
   const count = candidates.length;
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent(
@@ -223,7 +238,6 @@ export function buildSearchResults({ query, candidates, contextId }) {
 
 export function buildSearchEmpty(query) {
   return new ContainerBuilder()
-    .setAccentColor(COLOR.neutral)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
         `## No videos found\nNothing matched \`${truncate(mdEscape(query), 120)}\`. Try a different search.`,
@@ -243,11 +257,12 @@ export function buildResult(result, { sourceInput, refreshContextId, quota } = {
   const container = new ContainerBuilder().setAccentColor(accentFor(usage, research.status));
 
   const sourceLabel = titleCase(request.source ?? 'unknown');
+  const verdict = highestVerdict(usage, research.status);
   text(
     container,
     budget,
-    `## Copyright check\nSource: \`${sourceLabel}\`${sourceInput ? ` \u00b7 ${truncate(sourceInput, 120)}` : ''}`,
-    220,
+    `${verdict.emoji} **${verdict.label}**\n## Copyright check\nSource: \`${sourceLabel}\`${sourceInput ? ` \u00b7 ${truncate(sourceInput, 120)}` : ''}`,
+    320,
   );
 
   const trackLines = [];
@@ -352,7 +367,7 @@ export function buildResult(result, { sourceInput, refreshContextId, quota } = {
     footer.push(`Licensing contacts: ${contacts.slice(0, 3).map((url) => `<${url}>`).join(' ')}`);
   }
   footer.push('-# Research assistance, not legal advice.');
-  if (ai.model) footer.push(`-# Model: ${ai.model}${ai.cache_hit ? ' (cached)' : ''}`);
+  if (ai.cache_hit) footer.push('-# Cached research result.');
   if (quota && !quota.bypass) {
     footer.push(`-# Checks left today: ${quota.remaining} of ${quota.limit}`);
   }
@@ -376,14 +391,12 @@ function refreshRow(contextId) {
 
 export function buildNotice(title, body) {
   return new ContainerBuilder()
-    .setAccentColor(COLOR.info)
     .addTextDisplayComponents(new TextDisplayBuilder().setContent(`**${title}**\n${body}`));
 }
 
 export function buildQuotaExceeded({ used, limit, resetAt }) {
   const resetIn = resetAt ? formatResetIn(resetAt.getTime() - Date.now()) : '00:00 UTC';
   return new ContainerBuilder()
-    .setAccentColor(COLOR.caution)
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
         [
