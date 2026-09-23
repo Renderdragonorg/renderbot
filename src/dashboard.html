@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>renderbot audit</title>
+    <style>
+      :root {
+        --bg: #1e1f22;
+        --panel: #2b2d31;
+        --panel-2: #313338;
+        --line: #3f4147;
+        --text: #dbdee1;
+        --muted: #949ba4;
+        --accent: #5865f2;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      header { padding: 18px 22px 8px; }
+      h1 { margin: 0 0 14px; font-size: 20px; }
+      .cards { display: flex; flex-wrap: wrap; gap: 10px; }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 14px;
+        min-width: 110px;
+      }
+      .card .n { font-size: 20px; font-weight: 600; }
+      .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+      nav.tabs { display: flex; gap: 6px; padding: 12px 22px 0; flex-wrap: wrap; }
+      nav.tabs button {
+        background: transparent; color: var(--muted); border: 1px solid transparent;
+        border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit;
+      }
+      nav.tabs button.active { background: var(--panel); color: var(--text); border-color: var(--line); }
+      main { padding: 14px 22px 40px; }
+      .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px; }
+      .controls label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 12px; }
+      input, select, button {
+        background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 6px; padding: 6px 8px; font: inherit;
+      }
+      button { cursor: pointer; }
+      button:hover { border-color: var(--accent); }
+      .muted { color: var(--muted); }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
+      tbody tr { cursor: pointer; }
+      tbody tr:hover { background: var(--panel); }
+      td.req { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; color: #111; }
+      .ok { color: #57f287; } .err { color: #ed4245; }
+      .pager { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+      aside#detail {
+        position: fixed; top: 0; right: 0; width: min(640px, 92vw); height: 100%; overflow: auto;
+        background: var(--panel); border-left: 1px solid var(--line); padding: 16px; z-index: 10;
+      }
+      aside#detail pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+      #detail-close { margin-bottom: 10px; }
+      .avatar { width: 20px; height: 20px; border-radius: 50%; vertical-align: middle; margin-right: 6px; background: var(--panel-2); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>renderbot audit</h1>
+      <div id="totals" class="cards"></div>
+    </header>
+
+    <nav class="tabs">
+      <button data-tab="runs" class="active">Runs</button>
+      <button data-tab="users">By user</button>
+      <button data-tab="guilds">By guild</button>
+      <button data-tab="days">By day</button>
+    </nav>
+
+    <main>
+      <section id="tab-runs">
+        <div class="controls">
+          <label>Sort
+            <select id="sort">
+              <option value="date">date</option>
+              <option value="user">user</option>
+              <option value="guild">guild</option>
+              <option value="command">command</option>
+              <option value="duration">duration</option>
+              <option value="status">status</option>
+            </select>
+          </label>
+          <label>Direction
+            <select id="dir"><option value="desc">desc</option><option value="asc">asc</option></select>
+          </label>
+          <label>User id<input id="f-user" placeholder="any" /></label>
+          <label>Guild id<input id="f-guild" placeholder="any" /></label>
+          <label>Status
+            <select id="f-status"><option value="">any</option><option value="ok">ok</option><option value="error">error</option></select>
+          </label>
+          <label>Source
+            <select id="f-source"><option value="">any</option><option value="url">url</option><option value="file">file</option></select>
+          </label>
+          <label>Search<input id="f-q" placeholder="request contains…" /></label>
+          <label>Limit
+            <select id="f-limit"><option>25</option><option selected>50</option><option>100</option><option>200</option></select>
+          </label>
+          <button id="apply">Apply</button>
+          <span id="runs-count" class="muted"></span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>User</th><th>Guild</th><th>Cmd</th><th>Source</th>
+              <th>Request</th><th>Verdict</th><th>Status</th><th>Cache</th><th>ms</th>
+            </tr>
+          </thead>
+          <tbody id="runs-body"></tbody>
+        </table>
+        <div class="pager">
+          <button id="prev">Prev</button>
+          <span id="page" class="muted"></span>
+          <button id="next">Next</button>
+        </div>
+      </section>
+
+      <section id="tab-users" hidden>
+        <table>
+          <thead><tr><th>User</th><th>Runs</th><th>Ok</th><th>Errors</th><th>Cached</th><th>Last seen</th></tr></thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </section>
+
+      <section id="tab-guilds" hidden>
+        <table>
+          <thead><tr><th>Guild</th><th>Runs</th><th>Ok</th><th>Errors</th><th>Cached</th><th>Last seen</th></tr></thead>
+          <tbody id="guilds-body"></tbody>
+        </table>
+      </section>
+
+      <section id="tab-days" hidden>
+        <table>
+          <thead><tr><th>Day (UTC)</th><th>Runs</th><th>Ok</th><th>Errors</th><th>Cached</th></tr></thead>
+          <tbody id="days-body"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <aside id="detail" hidden>
+      <button id="detail-close">Close</button>
+      <h3 id="detail-title"></h3>
+      <pre id="detail-body"></pre>
+    </aside>
+
+    <script>
+      const TOKEN = new URLSearchParams(location.search).get('token');
+      const RANK = {
+        likely_not_permitted_without_permission: 5,
+        clearance_required: 4,
+        potentially_usable_with_platform_license: 3,
+        permitted_with_conditions: 2,
+        free_to_use: 1,
+        unknown: 0,
+      };
+      const VCOLOR = {
+        likely_not_permitted_without_permission: '#ed4245',
+        clearance_required: '#e67e22',
+        potentially_usable_with_platform_license: '#fee75c',
+        permitted_with_conditions: '#3ba55d',
+        free_to_use: '#57f287',
+        unknown: '#95a5a6',
+      };
+      const LABEL = {
+        likely_not_permitted_without_permission: 'not permitted',
+        clearance_required: 'clearance',
+        potentially_usable_with_platform_license: 'platform license',
+        permitted_with_conditions: 'permitted w/ conditions',
+        free_to_use: 'free to use',
+        unknown: 'unknown',
+      };
+      let offset = 0;
+
+      function el(tag, props, children) {
+        const node = document.createElement(tag);
+        if (props) for (const [k, v] of Object.entries(props)) {
+          if (k === 'class') node.className = v;
+          else if (k === 'text') node.textContent = v;
+          else node.setAttribute(k, v);
+        }
+        for (const child of children || []) if (child) node.appendChild(child);
+        return node;
+      }
+
+      async function api(path) {
+        const url = new URL(path, location.origin);
+        if (TOKEN) url.searchParams.set('token', TOKEN);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+        return res.json();
+      }
+
+      function topVerdict(result) {
+        if (!result || !result.verdicts) return 'unknown';
+        const vs = [result.verdicts.video, result.verdicts.social, result.verdicts.reality];
+        return vs.reduce((best, v) => ((RANK[v] ?? 0) > (RANK[best] ?? 0) ? v : best), 'unknown');
+      }
+
+      function chip(verdict) {
+        const v = verdict && VCOLOR[verdict] ? verdict : 'unknown';
+        return el('span', { class: 'chip', text: LABEL[v] || v, style: 'background:' + VCOLOR[v] });
+      }
+
+      function fmtTime(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      }
+
+      function userName(user) {
+        return user.display_name || user.username || user.id;
+      }
+
+      async function loadSummary() {
+        const s = await api('/api/summary');
+        const t = s.totals || {};
+        const cards = [
+          ['runs', t.total], ['ok', t.ok], ['errors', t.errors],
+          ['cached', t.cached], ['users', t.users], ['guilds', t.guilds],
+        ];
+        const box = document.getElementById('totals');
+        box.replaceChildren(...cards.map(([k, n]) =>
+          el('div', { class: 'card' }, [el('div', { class: 'n', text: String(n ?? 0) }), el('div', { class: 'k', text: k })])));
+
+        document.getElementById('users-body').replaceChildren(...(s.byUser || []).map((u) => {
+          const cells = [el('td', { text: u.name || u.user_id })];
+          cells.push(el('td', { text: String(u.total) }), el('td', { text: String(u.ok ?? 0) }),
+            el('td', { text: String(u.errors ?? 0) }), el('td', { text: String(u.cached ?? 0) }),
+            el('td', { text: fmtTime(u.last_seen) }));
+          const tr = el('tr', null, cells);
+          tr.onclick = () => { document.getElementById('f-user').value = u.user_id; offset = 0; showTab('runs'); loadRuns(); };
+          return tr;
+        }));
+
+        document.getElementById('guilds-body').replaceChildren(...(s.byGuild || []).map((g) => {
+          const cells = [el('td', { text: g.name || g.guild_id })];
+          cells.push(el('td', { text: String(g.total) }), el('td', { text: String(g.ok ?? 0) }),
+            el('td', { text: String(g.errors ?? 0) }), el('td', { text: String(g.cached ?? 0) }),
+            el('td', { text: fmtTime(g.last_seen) }));
+          const tr = el('tr', null, cells);
+          tr.onclick = () => { document.getElementById('f-guild').value = g.guild_id === 'dm' ? '' : g.guild_id; offset = 0; showTab('runs'); loadRuns(); };
+          return tr;
+        }));
+
+        document.getElementById('days-body').replaceChildren(...(s.byDay || []).map((d) =>
+          el('tr', null, [el('td', { text: d.day }), el('td', { text: String(d.total) }),
+            el('td', { text: String(d.ok ?? 0) }), el('td', { text: String(d.errors ?? 0) }),
+            el('td', { text: String(d.cached ?? 0) })])));
+      }
+
+      async function loadRuns() {
+        const params = new URLSearchParams({
+          sort: document.getElementById('sort').value,
+          dir: document.getElementById('dir').value,
+          limit: document.getElementById('f-limit').value,
+          offset: String(offset),
+        });
+        for (const [key, id] of [['user_id', 'f-user'], ['guild_id', 'f-guild'], ['status', 'f-status'], ['source', 'f-source'], ['q', 'f-q']]) {
+          const v = document.getElementById(id).value.trim();
+          if (v) params.set(key, v);
+        }
+        const data = await api('/api/checks?' + params.toString());
+        const body = document.getElementById('runs-body');
+        body.replaceChildren(...(data.rows || []).map((r) => {
+          const user = el('td', null, []);
+          if (r.user.avatar_url) user.appendChild(el('img', { class: 'avatar', src: r.user.avatar_url, alt: '' }));
+          user.appendChild(document.createTextNode(userName(r.user)));
+          const cells = [
+            el('td', { text: fmtTime(r.created_at) }),
+            user,
+            el('td', { text: r.guild ? (r.guild.name || r.guild.id) : 'DM' }),
+            el('td', { text: r.command }),
+            el('td', { text: r.source || '' }),
+            el('td', { class: 'req', text: r.request || '', title: r.request || '' }),
+            el('td', null, [chip(topVerdict(r.result))]),
+            el('td', { class: r.status === 'ok' ? 'ok' : 'err', text: r.status }),
+            el('td', { text: r.from_cache === null ? '' : (r.from_cache ? 'yes' : 'no') }),
+            el('td', { text: r.duration_ms == null ? '' : String(r.duration_ms) }),
+          ];
+          const tr = el('tr', null, cells);
+          tr.onclick = () => showDetail(r.id);
+          return tr;
+        }));
+        const shown = offset + (data.rows || []).length;
+        document.getElementById('runs-count').textContent = data.total + ' runs';
+        document.getElementById('page').textContent = 'showing ' + (data.total ? offset + 1 : 0) + '–' + shown + ' of ' + data.total;
+        document.getElementById('prev').disabled = offset <= 0;
+        document.getElementById('next').disabled = shown >= data.total;
+      }
+
+      async function showDetail(id) {
+        const row = await api('/api/checks/' + id);
+        const aside = document.getElementById('detail');
+        document.getElementById('detail-title').textContent = '#' + row.id + ' · ' + userName(row.user);
+        const meta = {
+          time: row.created_at, user: row.user, guild: row.guild, command: row.command,
+          source: row.source, request: row.request, status: row.status,
+          from_cache: row.from_cache, duration_ms: row.duration_ms, error: row.error,
+        };
+        document.getElementById('detail-body').textContent =
+          JSON.stringify(meta, null, 2) + '\n\n' + JSON.stringify(row.answer, null, 2);
+        aside.hidden = false;
+      }
+
+      function showTab(name) {
+        for (const tab of ['runs', 'users', 'guilds', 'days']) {
+          document.getElementById('tab-' + tab).hidden = tab !== name;
+        }
+        for (const btn of document.querySelectorAll('nav.tabs button')) {
+          btn.classList.toggle('active', btn.dataset.tab === name);
+        }
+      }
+
+      document.querySelectorAll('nav.tabs button').forEach((btn) => {
+        btn.onclick = () => showTab(btn.dataset.tab);
+      });
+      document.getElementById('apply').onclick = () => { offset = 0; loadRuns(); };
+      document.getElementById('prev').onclick = () => { offset = Math.max(0, offset - Number(document.getElementById('f-limit').value)); loadRuns(); };
+      document.getElementById('next').onclick = () => { offset += Number(document.getElementById('f-limit').value); loadRuns(); };
+      document.getElementById('detail-close').onclick = () => { document.getElementById('detail').hidden = true; };
+      document.getElementById('f-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { offset = 0; loadRuns(); } });
+
+      loadSummary().catch((e) => { document.getElementById('totals').textContent = 'Failed to load: ' + e.message; });
+      loadRuns().catch((e) => { document.getElementById('runs-count').textContent = 'Failed to load: ' + e.message; });
+    </script>
+  </body>
+</html>

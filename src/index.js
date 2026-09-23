@@ -6,6 +6,7 @@ import { JsonStore } from './db.js';
 import { CheckQueue } from './queue.js';
 import { RequestLogger } from './audit.js';
 import { CheckApi } from './api.js';
+import { Dashboard } from './dashboard.js';
 import { handleButton, handleSlash, registerCommands } from './commands.js';
 import { handlePrefixMessage } from './prefix.js';
 import { V2, buildError, buildNotice } from './render.js';
@@ -32,12 +33,21 @@ const api = config.api.enabled
       trustProxy: config.api.trustProxy,
     })
   : null;
+const dashboard = config.dashboard.enabled
+  ? new Dashboard({
+      audit,
+      host: config.dashboard.host,
+      port: config.dashboard.port,
+      token: config.dashboard.token,
+    })
+  : null;
 const deps = { engine, store, db, audit, config, queue };
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
   ],
 });
@@ -69,6 +79,12 @@ client.once(readyEvent, async () => {
       .start()
       .then((address) => console.log(`Checks API listening on http://${address.address}:${address.port}`))
       .catch((error) => console.error(`Checks API failed to start: ${error.message}`));
+  }
+  if (dashboard) {
+    dashboard
+      .start()
+      .then((address) => console.log(`Admin dashboard on http://${address.address}:${address.port}`))
+      .catch((error) => console.error(`Admin dashboard failed to start: ${error.message}`));
   }
   try {
     await registerCommands(config);
@@ -110,6 +126,7 @@ async function shutdown(signal) {
   console.log(`\nReceived ${signal}, shutting down...`);
   await engine.stop();
   await api?.close();
+  await dashboard?.close();
   db.close();
   audit.close();
   client.destroy();

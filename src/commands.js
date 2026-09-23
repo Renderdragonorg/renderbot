@@ -1,4 +1,6 @@
 import {
+  ApplicationIntegrationType,
+  InteractionContextType,
   MessageFlags,
   REST,
   Routes,
@@ -59,30 +61,43 @@ export const commandDefinitions = [
   new SlashCommandBuilder().setName('help').setDescription('Show what this bot can do.').toJSON(),
 ];
 
+// Guild-scoped commands never appear in DMs; only global commands with the
+// BotDM context do. So the global copy opts into DMs while the per-guild copy
+// (below) stays instant in the allowed servers.
+const globalCommandDefinitions = commandDefinitions.map((command) => ({
+  ...command,
+  integration_types: [ApplicationIntegrationType.GuildInstall],
+  contexts: [InteractionContextType.Guild, InteractionContextType.BotDM],
+}));
+
 export async function registerCommands(config) {
   const rest = new REST({ version: '10' }).setToken(config.token);
+
+  try {
+    await rest.put(Routes.applicationCommands(config.clientId), { body: globalCommandDefinitions });
+    console.log(`Registered ${globalCommandDefinitions.length} global slash commands (guild + bot DM).`);
+  } catch (error) {
+    console.error(`Global slash command registration failed: ${error.message}`);
+  }
+
   const guildTargets = config.allowedGuildIds.size
     ? [...config.allowedGuildIds]
     : config.guildId
       ? [config.guildId]
       : [];
-  if (guildTargets.length) {
-    let registered = 0;
-    for (const guildId of guildTargets) {
-      try {
-        await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), {
-          body: commandDefinitions,
-        });
-        registered += 1;
-      } catch (error) {
-        console.error(`Slash command registration failed for guild ${guildId}: ${error.message}`);
-      }
+  if (!guildTargets.length) return;
+  let registered = 0;
+  for (const guildId of guildTargets) {
+    try {
+      await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), {
+        body: commandDefinitions,
+      });
+      registered += 1;
+    } catch (error) {
+      console.error(`Slash command registration failed for guild ${guildId}: ${error.message}`);
     }
-    console.log(`Registered ${commandDefinitions.length} slash commands in ${registered} guild(s).`);
-    return;
   }
-  await rest.put(Routes.applicationCommands(config.clientId), { body: commandDefinitions });
-  console.log(`Registered ${commandDefinitions.length} global slash commands.`);
+  console.log(`Registered ${commandDefinitions.length} slash commands in ${registered} guild(s).`);
 }
 
 function componentsV2(container) {

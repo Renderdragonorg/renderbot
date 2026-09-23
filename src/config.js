@@ -49,6 +49,8 @@ export const config = {
   // Shown as the bot's "Playing" activity, e.g. "Playing /check".
   botStatus: process.env.BOT_STATUS?.trim() || '/check',
   allowedGuildIds: idList(process.env.ALLOWED_GUILD_IDS),
+  // Accept direct messages even when ALLOWED_GUILD_IDS restricts guilds.
+  allowDms: bool(process.env.ALLOW_DMS, false),
   engine: {
     url: process.env.LOONEY_URL?.trim() || null,
     bin: resolveFromRoot(process.env.LOONEY_BIN) || defaultBin,
@@ -102,6 +104,12 @@ export const config = {
     rateLimitPerMinute: int(process.env.API_RATE_LIMIT_PER_MINUTE, 120),
     trustProxy: bool(process.env.API_TRUST_PROXY, true),
   },
+  dashboard: {
+    enabled: bool(process.env.DASHBOARD_ENABLED, false),
+    host: process.env.DASHBOARD_HOST?.trim() || '127.0.0.1',
+    port: int(process.env.DASHBOARD_PORT, 8890),
+    token: process.env.DASHBOARD_TOKEN?.trim() || null,
+  },
   queue: {
     concurrency: Math.max(1, int(process.env.QUEUE_CONCURRENCY, 2)),
   },
@@ -118,12 +126,14 @@ export const config = {
 
 /**
  * Whether the bot may respond in the given guild. An empty allowlist means
- * every guild (and DMs) is allowed; when set, only the listed guild ids are
- * permitted and direct messages are refused.
+ * every guild (and DMs) is allowed; when it is set, only the listed guild ids
+ * are permitted, and DMs are refused unless ALLOW_DMS is on.
  */
 export function isGuildAllowed(guildId) {
+  const isDm = guildId === null || guildId === undefined;
+  if (isDm) return config.allowDms || config.allowedGuildIds.size === 0;
   if (config.allowedGuildIds.size === 0) return true;
-  return typeof guildId === 'string' && config.allowedGuildIds.has(guildId);
+  return config.allowedGuildIds.has(guildId);
 }
 
 export function validateConfig() {

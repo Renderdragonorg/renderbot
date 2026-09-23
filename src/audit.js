@@ -4,6 +4,16 @@ import { DatabaseSync } from 'node:sqlite';
 
 const MAX_ANSWER_CHARS = 200_000;
 
+/** Whitelisted ORDER BY expressions for the admin dashboard (never user input). */
+const ADMIN_SORTS = {
+  date: 'id',
+  user: 'COALESCE(display_name, username, user_id) COLLATE NOCASE',
+  guild: 'COALESCE(guild_name, guild_id) COLLATE NOCASE',
+  command: 'command COLLATE NOCASE',
+  duration: 'duration_ms',
+  status: 'status COLLATE NOCASE',
+};
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   user_id       TEXT PRIMARY KEY,
@@ -79,6 +89,53 @@ function publicCheck(row) {
     from_cache: row.from_cache === null ? null : Boolean(row.from_cache),
     duration_ms: row.duration_ms,
     answer: parseAnswer(row.answer),
+  };
+}
+
+/**
+ * Compact, table-friendly projection of a stored answer: enough to show a
+ * verdict and summary column without shipping the whole research payload.
+ */
+function compactResult(text) {
+  const parsed = parseAnswer(text);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const research = parsed.research ?? {};
+  const usage = research.usage_assessment ?? {};
+  return {
+    status: research.status ?? null,
+    summary: research.summary ?? null,
+    verdicts: {
+      video: usage.video_verdict ?? null,
+      social: usage.social_media_verdict ?? null,
+      reality: usage.reality_tv_verdict ?? null,
+    },
+    creator_declared_license: usage.creator_declared_license ?? null,
+    provider: parsed.ai_meta?.provider ?? null,
+    cache_hit: typeof parsed.ai_meta?.cache_hit === 'boolean' ? parsed.ai_meta.cache_hit : null,
+  };
+}
+
+/** Full admin row: everything the audit trail holds, including Discord identity. */
+function adminRow(row) {
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    user: {
+      id: row.user_id,
+      username: row.username,
+      display_name: row.display_name,
+      avatar_url: row.avatar_url,
+    },
+    guild: row.guild_id ? { id: row.guild_id, name: row.guild_name } : null,
+    channel_id: row.channel_id,
+    command: row.command,
+    source: row.source,
+    request: row.request,
+    status: row.status,
+    from_cache: row.from_cache === null ? null : Boolean(row.from_cache),
+    duration_ms: row.duration_ms,
+    error: row.error,
+    result: compactResult(row.answer),
   };
 }
 
@@ -239,6 +296,122 @@ export class RequestLogger {
       )
       .get(id);
     return row ? publicCheck(row) : null;
+  }
+
+  /**
+   * Admin listing with Discord identity, sortable by date/user/guild. Unlike
+   * {@link findPublicChecks} this is for the local dashboard only — it is never
+   * served by the public API.
+   *
+   * @param {object} [options]
+   * @param {string} [options.sort]  one of the ADMIN_SORTS keys
+   * @param {'asc'|'desc'} [options.dir]
+   */
+  adminChecks({
+    limit = 50,
+    offset = 0,
+    sort = 'date',
+    dir = 'desc',
+    userId = null,
+    guildId = null,
+    status = null,
+    source = null,
+    query = null,
+    from = null,
+    to = null,
+  } = {}) {
+    const orderBy = ADMIN_SORTS[sort] ?? ADMIN_SORTS.date;
+    const direction = dir === 'asc' ? 'ASC' : 'DESC';
+    const where = [];
+    const params = [];
+    if (userId) {
+      where.push('user_id = ?');
+      params.push(String(userId));
+    }
+    if (guildId) {
+      where.push('guild_id = ?');
+      params.push(String(guildId));
+    }
+    if (status === 'ok' || status === 'error') {
+      where.push('status = ?');
+      params.push(status);
+    }
+    if (source === 'url' || source === 'file') {
+      where.push('source = ?');
+      params.push(source);
+    }
+    if (query) {
+      where.push("request LIKE ? ESCAPE '\\'");
+      params.push(`%${escapeLike(query)}%`);
+    }
+    if (from) {
+      where.push('created_at >= ?');
+      params.push(String(from));
+    }
+    if (to) {
+      where.push('created_at <= ?');
+      params.push(String(to));
+    }
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = this.db.prepare(`SELECT COUNT(*) AS n FROM requests ${clause}`).get(...params).n;
+    const rows = this.db
+      .prepare(
+        `SELECT id, created_at, user_id, username, display_name, avatar_url,
+                guild_id, guild_name, channel_id, command, source, request,
+                status, from_cache, duration_ms, answer, error
+         FROM requests ${clause}
+         ORDER BY ${orderBy} ${direction}, id DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset);
+    return { total, rows: rows.map(adminRow) };
+  }
+
+  /** One admin row plus the full stored answer, for the detail panel. */
+  adminCheck(id) {
+    const row = this.db.prepare('SELECT * FROM requests WHERE id = ?').get(id);
+    if (!row) return null;
+    return { ...adminRow(row), answer: parseAnswer(row.answer) };
+  }
+
+  /** Aggregate counts for the dashboard overview: totals, by user, guild, day. */
+  adminSummary() {
+    const totals = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                SUM(status = 'ok') AS ok,
+                SUM(status = 'error') AS errors,
+                SUM(from_cache = 1) AS cached,
+                COUNT(DISTINCT user_id) AS users,
+                COUNT(DISTINCT guild_id) AS guilds
+         FROM requests`,
+      )
+      .get();
+    const byUser = this.db
+      .prepare(
+        `SELECT user_id, COALESCE(display_name, username, user_id) AS name, avatar_url,
+                COUNT(*) AS total, SUM(status = 'ok') AS ok, SUM(status = 'error') AS errors,
+                SUM(from_cache = 1) AS cached, MAX(created_at) AS last_seen
+         FROM requests GROUP BY user_id ORDER BY total DESC, name COLLATE NOCASE LIMIT 100`,
+      )
+      .all();
+    const byGuild = this.db
+      .prepare(
+        `SELECT COALESCE(guild_id, 'dm') AS guild_id,
+                COALESCE(guild_name, CASE WHEN guild_id IS NULL THEN 'Direct messages' ELSE guild_id END) AS name,
+                COUNT(*) AS total, SUM(status = 'ok') AS ok, SUM(status = 'error') AS errors,
+                SUM(from_cache = 1) AS cached, MAX(created_at) AS last_seen
+         FROM requests GROUP BY COALESCE(guild_id, 'dm') ORDER BY total DESC, name COLLATE NOCASE LIMIT 100`,
+      )
+      .all();
+    const byDay = this.db
+      .prepare(
+        `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS total,
+                SUM(status = 'ok') AS ok, SUM(status = 'error') AS errors, SUM(from_cache = 1) AS cached
+         FROM requests GROUP BY day ORDER BY day DESC LIMIT 60`,
+      )
+      .all();
+    return { totals, byUser, byGuild, byDay };
   }
 
   countCompleted() {

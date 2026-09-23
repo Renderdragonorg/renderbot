@@ -73,6 +73,7 @@ The ones you are most likely to touch:
 | `DISCORD_GUILD_ID` | — | Register slash commands instantly in one guild; blank registers globally |
 | `BOT_PREFIX` | `!` | Prefix for the legacy text commands |
 | `ALLOWED_GUILD_IDS` | — (all) | Comma/space-separated guild ids the bot may serve; blank allows every server and DMs |
+| `ALLOW_DMS` | `false` | Accept direct messages even when `ALLOWED_GUILD_IDS` restricts guilds |
 | `LOONEY_BIN` | macOS vendor path | Engine executable; relative paths resolve from the project root |
 | `LOONEY_URL` | — | Use an external engine instead of spawning one |
 | `LOONEY_PORT` | `8799` | Port for the managed engine |
@@ -82,6 +83,7 @@ The ones you are most likely to touch:
 | `QUOTA_DAILY_LIMIT` | `5` | Checks per user per UTC day |
 | `QUOTA_BYPASS_USER_IDS` | — | Comma/space-separated user ids that skip the limit |
 | `API_ENABLED` | `false` | Serve the read-only public checks API |
+| `DASHBOARD_ENABLED` | `false` | Serve the localhost admin audit dashboard |
 
 `validateConfig()` fails fast on a missing token, client id, or the API key
 required by the selected backend (skipped when `LOONEY_URL` is set).
@@ -112,6 +114,25 @@ GET /checks/:id
 Responses are PII-free by construction: only `id`, `created_at`, `command`,
 `source`, `request`, `from_cache`, `duration_ms`, and `answer` are projected.
 There is no auth, so a fixed-window per-IP rate limiter is the only guard.
+
+## Admin dashboard
+
+With `DASHBOARD_ENABLED=true`, `src/dashboard.js` serves a small HTML page over
+the full audit log — user, guild, channel, verdict, cache, duration — with
+sorting by date/user/guild and filters. It is **not** PII-free, so it binds to
+`127.0.0.1:8890` by default; set `DASHBOARD_TOKEN` to require a token, and reach
+it over an SSH tunnel:
+
+```bash
+ssh -L 8890:127.0.0.1:8890 opc@<host>   # then open http://127.0.0.1:8890
+```
+
+```
+GET /                      -> the page
+GET /api/summary           -> totals + by user/guild/day
+GET /api/checks?...        -> rows: sort, dir, user_id, guild_id, status, source, q, limit, offset
+GET /api/checks/:id        -> one row with the full answer JSON
+```
 
 ## Deployment
 

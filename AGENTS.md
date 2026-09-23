@@ -30,6 +30,8 @@ src/
   db.js         JsonStore: users + daily usage (atomic temp+rename writes)
   audit.js      RequestLogger: SQLite audit trail + public read queries
   api.js        CheckApi: read-only public HTTP API over completed checks
+  dashboard.js  Dashboard: localhost admin audit page + JSON (with PII)
+  dashboard.html  the dashboard page, served verbatim
   store.js      ContextStore: in-memory refresh + search-pick contexts (TTL)
   commands.js   slash commands (/check /file /help), refresh + pick buttons, audit
   prefix.js     legacy `!check` `!file` `!help` text commands
@@ -44,6 +46,13 @@ Interactions flow through `commands.js` / `prefix.js`, which share
 `handlers.js`, `quota.js`, and the render builders. `index.js` builds the
 `deps` object `{ engine, store, db, audit, config }` passed everywhere.
 
+**Direct messages** are off by default: the guild allowlist refuses a null
+guild, and the bot does not request the Direct Messages intent. Set
+`ALLOW_DMS=true` to accept them (the intent is always requested, so enabling is
+env-only). DMs use the prefix commands (`!check` / `!file`); slash commands only
+appear there because `registerCommands()` also pushes a **global** copy with the
+`BotDM` context — guild-scoped commands never reach DMs.
+
 ## 3. Configuration
 
 All config comes from `.env` (see `.env.example`); `config.js` loads it via
@@ -57,6 +66,7 @@ dotenv and resolves relative paths from the project root. Real env always wins.
 | `BOT_PREFIX` | `!` | Prefix for legacy text commands |
 | `BOT_STATUS` | `/check` | Bot presence activity, shown as "Playing &lt;value&gt;" |
 | `ALLOWED_GUILD_IDS` | — (all) | Comma/space guild ids the bot may serve; blank = every guild + DMs |
+| `ALLOW_DMS` | `false` | Accept DMs even when `ALLOWED_GUILD_IDS` restricts guilds (needs the Direct Messages intent) |
 | `LOONEY_BIN` | macOS vendor path | Engine executable; relative = from project root |
 | `LOONEY_URL` | — | Point at an already-running engine instead of spawning one |
 | `LOONEY_PORT` | `8799` | Port for the managed engine |
@@ -90,6 +100,9 @@ dotenv and resolves relative paths from the project root. Real env always wins.
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8800` | API bind address (localhost by default) |
 | `API_RATE_LIMIT_PER_MINUTE` | `120` | Per-IP request cap; `0` disables |
 | `API_TRUST_PROXY` | `true` | Trust `x-forwarded-for` for client IPs |
+| `DASHBOARD_ENABLED` | `false` | Serve the admin audit dashboard (localhost) |
+| `DASHBOARD_HOST` / `DASHBOARD_PORT` | `127.0.0.1` / `8890` | Dashboard bind address |
+| `DASHBOARD_TOKEN` | — | If set, require `?token=` or a `Bearer` header |
 | `QUEUE_CONCURRENCY` | `2` | Max checks running at once; extras wait in the queue |
 | `QUOTA_DAILY_LIMIT` | `5` | Checks per user per UTC day |
 | `QUOTA_BYPASS_USER_IDS` | — | Comma/space list of user ids that skip the limit |
@@ -216,7 +229,14 @@ trims every length-capped AI string on a word boundary with a trailing `…`
 (`_clip` in `ai_researcher.py`) instead of the old blunt `value[:limit]`, and
 raises the summary cap to 600 chars (prompt version `3`). Bumping the prompt
 version re-keys the cache once, so existing entries re-run research the next time
-they're checked.
+they're checked. Engine **v0.3.7** fetches the video's pinned/relevant comments
+and scans the description + comments for creator licence phrases ("royalty
+free", "free to use", "CC BY", …), storing them as `TrackMetadata.top_comments`
+/ `license_statements`; it adds `usage_assessment.creator_declared_license` and
+the `free_to_use` / `permitted_with_conditions` verdicts, and raises the
+description cap to 4000 chars (prompt version `6`). `top_comments` is excluded
+from the cache key. The bot renders the new verdicts and the creator-declared
+line (`render.js`).
 
 ### Source vs prebuilt binary
 `scripts/fetch-engine.sh` downloads the prebuilt release bundle for the current
@@ -306,6 +326,20 @@ from_cache, duration_ms, answer`):
 Never widen that projection without a deliberate decision — user, avatar, guild
 and channel must not leave the box.
 
+### Admin dashboard — `src/dashboard.js` (`Dashboard`)
+HTML + JSON server over the **full** audit log (user, guild, channel, verdict,
+cache, duration), off unless `DASHBOARD_ENABLED=true`. It is deliberately *not*
+PII-free, so it binds `DASHBOARD_HOST:DASHBOARD_PORT` (localhost by default) and
+honours an optional `DASHBOARD_TOKEN` (`?token=` or `Bearer`). Reach it over an
+SSH tunnel; never publish it. Reads go through `RequestLogger.adminChecks` /
+`adminCheck` / `adminSummary` (sort whitelisted in `ADMIN_SORTS`, never raw
+input). The page is `src/dashboard.html`, served verbatim.
+
+- `GET /` → the page
+- `GET /api/summary` → `{ totals, byUser[], byGuild[], byDay[] }`
+- `GET /api/checks?sort&dir&user_id&guild_id&status&source&q&limit&offset`
+- `GET /api/checks/:id` → one row + full answer
+
 ## 6. Rendering rules (`render.js`)
 
 - Every reply is a Components V2 container: `flags: V2` (=`MessageFlags.IsComponentsV2`),
@@ -330,6 +364,12 @@ and channel must not leave the box.
   same verdict is echoed at the top of the embed as a bold, emoji-tagged status
   line (`highestVerdict()`), so the color and the text always agree. This badge
   is the one deliberate emoji exception to the no-emoji rule.
+- `VERDICTS` ranks, worst first: `likely_not_permitted_without_permission` (red),
+  `clearance_required` (orange), `potentially_usable_with_platform_license`
+  (yellow), `permitted_with_conditions` (green, v0.3.7), `free_to_use` (green,
+  v0.3.7), `unknown` (gray, lowest). A known verdict always wins over an unclear
+  dimension, so `unknown` only shows when all three are unknown. Unknown verdict
+  strings fall back to `unknown`.
 
 ## 7. Running & deploying
 
@@ -363,7 +403,7 @@ Host `opc@130.61.53.246` — Oracle Linux 9.8, x86_64, shape
 | --- | --- |
 | Bot checkout | `~/renderbot` (`.env` mode `600`) |
 | Node | v22.23.2, official tarball at `/usr/local/bin/node` (dnf not used) |
-| Engine | v0.3.6 **from source**, in standalone CPython 3.11.16 `~/python311/python` |
+| Engine | v0.3.7 **from source**, in standalone CPython 3.11.16 `~/python311/python` |
 | `LOONEY_BIN` | `/home/opc/python311/python/bin/music-copyright-checker-server` |
 | Backend / model | `openrouter` / `openrouter/free`; fallback `openai-compatible` (Token Harbor) / `mimo-v2.5:free`; Exa search |
 | Engine cache | `LOONEY_CACHE_PATH=/home/opc/.cache/renderbot-engine.sqlite3` |
@@ -372,6 +412,7 @@ Host `opc@130.61.53.246` — Oracle Linux 9.8, x86_64, shape
 | Discord identity | `Renderbot | RenderDragonORG#7905` |
 | Allowed guilds | `ALLOWED_GUILD_IDS=1317605088558190602 1550072373229789204` |
 | Service | systemd **user** unit `renderbot.service`, linger enabled |
+| Admin dashboard | `DASHBOARD_ENABLED=true`, `127.0.0.1:8890` — reach it with `ssh -L 8890:127.0.0.1:8890 -i ~/.ssh/renderbot-oracle.key opc@130.61.53.246` |
 
 ```bash
 # status / logs / restart (XDG_RUNTIME_DIR is needed over plain ssh)

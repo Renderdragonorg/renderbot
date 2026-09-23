@@ -19,30 +19,42 @@ const COLOR = {
   caution: 0xe67e22,
   warn: 0xfee75c,
   ok: 0x57f287,
+  good: 0x3ba55d,
   info: 0x5865f2,
   neutral: 0x95a5a6,
 };
 
+// Ordered by severity: a higher rank is more restrictive, so the accent and
+// badge show the worst of the three usage verdicts. `unknown` is the lowest so
+// a known verdict (including the positive ones) always wins over an unclear
+// dimension; `unknown` only shows when every dimension is unknown.
 const VERDICTS = {
   likely_not_permitted_without_permission: {
     label: 'Likely not permitted without permission',
     emoji: '\u{1F534}',
-    rank: 4,
+    rank: 5,
     color: COLOR.stop,
   },
   clearance_required: {
     label: 'Clearance required',
     emoji: '\u{1F7E0}',
-    rank: 3,
+    rank: 4,
     color: COLOR.caution,
   },
   potentially_usable_with_platform_license: {
     label: 'Potentially usable with a platform license',
     emoji: '\u{1F7E1}',
-    rank: 2,
+    rank: 3,
     color: COLOR.warn,
   },
-  unknown: { label: 'Unknown', emoji: '\u26AA', rank: 1, color: COLOR.neutral },
+  permitted_with_conditions: {
+    label: 'Permitted with conditions',
+    emoji: '\u2705',
+    rank: 2,
+    color: COLOR.good,
+  },
+  free_to_use: { label: 'Free to use', emoji: '\u{1F7E2}', rank: 1, color: COLOR.ok },
+  unknown: { label: 'Unknown', emoji: '\u26AA', rank: 0, color: COLOR.neutral },
 };
 
 const TOTAL_TEXT_BUDGET = 3_900;
@@ -100,7 +112,7 @@ function highestVerdict(usage, status) {
   const ranks = [usage?.video_verdict, usage?.social_media_verdict, usage?.reality_tv_verdict].map(
     (verdict) => verdictOf(verdict).rank,
   );
-  const highest = Math.max(...ranks, 1);
+  const highest = Math.max(...ranks);
   return Object.values(VERDICTS).find((entry) => entry.rank === highest) ?? VERDICTS.unknown;
 }
 
@@ -309,6 +321,9 @@ export function buildResult(result, { sourceInput, refreshContextId, quota } = {
     `Social media: ${verdictOf(usage.social_media_verdict).label}`,
     `Reality TV: ${verdictOf(usage.reality_tv_verdict).label}`,
   ];
+  if (usage.creator_declared_license) {
+    usageLines.push(`Creator-declared: ${truncate(mdEscape(usage.creator_declared_license), 240)}`);
+  }
   const licenseFlags = [];
   if (typeof usage.sync_license_required === 'boolean') {
     licenseFlags.push(`Sync license ${usage.sync_license_required ? 'required' : 'not required'}`);
